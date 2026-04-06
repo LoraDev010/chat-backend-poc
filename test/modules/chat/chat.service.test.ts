@@ -6,7 +6,7 @@ function makeRoom(users: Record<string, { alias: string; lastMessageAt?: number;
     id: 'test',
     name: 'test',
     code: '',
-    ownedBy: 'system',
+    ownerAlias: 'system',
     users: new Map(),
     aliases: new Set(),
     bans: new Map(),

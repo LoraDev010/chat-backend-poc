@@ -2,7 +2,7 @@
 
 Servidor Node.js con Socket.io para chat en tiempo real.
 
-## 🚀 Stack Tecnológico
+## Stack Tecnológico
 
 - **Node.js** con TypeScript
 - **Express** como framework HTTP
@@ -11,7 +11,7 @@ Servidor Node.js con Socket.io para chat en tiempo real.
 - **Jest** para testing
 - **Arquitectura modular** por features
 
-## 📁 Estructura
+## Estructura
 
 ```
 src/
@@ -23,7 +23,7 @@ src/
 └── shared/          # Tipos compartidos
 ```
 
-## 🛠️ Setup
+## Setup
 
 ### Instalación
 
@@ -51,7 +51,7 @@ npm run build
 npm start
 ```
 
-## 🧪 Testing
+## Testing
 
 ```bash
 # Ejecutar tests
@@ -64,7 +64,7 @@ npm run test:coverage
 npm run test:watch
 ```
 
-## 🔧 Configuración
+## Configuración
 
 Variables de entorno disponibles:
 
@@ -75,7 +75,7 @@ NODE_ENV=development
 
 Crea un archivo `.env` en la raíz del servidor si necesitas sobrescribir valores.
 
-## 📦 Scripts Disponibles
+## Scripts Disponibles
 
 - `npm run dev` - Desarrollo con tsx watch
 - `npm run build` - Compila TypeScript a JavaScript
@@ -84,7 +84,7 @@ Crea un archivo `.env` en la raíz del servidor si necesitas sobrescribir valore
 - `npm run test:coverage` - Tests con reporte de cobertura
 - `npm run test:watch` - Tests en modo watch
 
-## 🏗️ Arquitectura
+## Arquitectura
 
 Este proyecto sigue una arquitectura modular:
 
@@ -93,7 +93,7 @@ Este proyecto sigue una arquitectura modular:
 - **Servicios independientes**: lógica de negocio aislada
 - **Gateway centralizado**: manejo de eventos Socket.io
 
-## 📡 API (Socket.io)
+## API (Socket.io)
 
 ### Eventos del Cliente
 
@@ -112,9 +112,9 @@ Este proyecto sigue una arquitectura modular:
 - `user:left` - Usuario abandonó sala
 - `typing:update` - Actualización de usuarios escribiendo
 
-## 📝 Notas
+## Notas
 
-- Sin persistencia (datos en memoria)
-- Sin autenticación formal
+- Persistencia híbrida: metadata de salas en SQLite, estado runtime (usuarios, aliases, bans) en memoria
+- Sin autenticación formal (solo alias)
 - Diseñado como POC/demo
 - Coverage objetivo: >80%

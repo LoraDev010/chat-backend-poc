@@ -12,4 +12,5 @@ export const joinByCodeSchema = z.object({
 
 export const deleteRoomSchema = z.object({
   roomId: z.string().min(1),
+  alias: z.string().min(1).max(32).trim(),
 });

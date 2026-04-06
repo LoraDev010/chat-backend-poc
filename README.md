@@ -1,53 +1,106 @@
 # Chat Backend
 
-Servidor Node.js con Socket.io para chat en tiempo real.
+Servidor Node.js con Socket.io para chat en tiempo real. Para instrucciones completas de setup con Docker, ver el [README principal](../../README.md).
 
-## Stack Tecnológico
+## Stack
 
-- **Node.js** con TypeScript
-- **Express** como framework HTTP
-- **Socket.io** para comunicación real-time
-- **Zod** para validación de schemas
-- **Jest** para testing
-- **Arquitectura modular** por features
+- Node.js 22 + TypeScript 5 (ES Modules, strict mode)
+- Express + Socket.io 4
+- Drizzle ORM + better-sqlite3
+- Zod para validación
+- Jest 30 (93 tests, 92% coverage)
 
 ## Estructura
 
 ```
 src/
-├── config/           # Configuración (env, socket)
-├── modules/          # Módulos de negocio
-│   ├── chat/        # Gestión de mensajes
-│   ├── rooms/       # Gestión de salas
-│   └── users/       # Gestión de usuarios
-└── shared/          # Tipos compartidos
+├── config/
+│   ├── env.ts              # Variables de entorno
+│   ├── socket.ts           # Configuración Socket.io
+│   └── database/           # Drizzle ORM schema + client
+├── modules/
+│   ├── chat/               # Mensajes, rate limiting, typing
+│   ├── rooms/              # CRUD salas, repository pattern
+│   └── users/              # Join/leave/kick, bans temporales
+├── shared/
+│   ├── types/              # Interfaces Socket.io tipadas
+│   └── schemas/            # Zod schemas para validación
+├── app.ts                  # Express app factory
+└── server.ts               # Entry point, Socket.io init
 ```
 
-## Setup
-
-### Instalación
+## Setup Local (Sin Docker)
 
 ```bash
+# Instalar dependencias
 npm install
-```
 
-### Desarrollo
-
-```bash
+# Desarrollo (watch mode)
 npm run dev
-```
 
-El servidor estará disponible en `http://localhost:3000`
-
-### Build
-
-```bash
+# Build
 npm run build
+
+# Producción
+npm start
+
+# Tests
+npm test
+npm run test:coverage
+
+# Drizzle ORM
+npm run db:generate   # Generar migraciones
+npm run db:migrate    # Aplicar migraciones
+npm run db:studio     # GUI para explorar DB
 ```
 
-### Producción
+## Variables de Entorno
 
-```bash
+```env
+PORT=3000
+NODE_ENV=development
+DB_PATH=./rooms.db
+CORS_ORIGIN=*
+```
+
+## Testing
+
+93 tests en 8 suites:
+- `app.test.ts` - Express app
+- `config.test.ts` - Validación env
+- `schemas.test.ts` - Zod schemas
+- `chat.service.test.ts` - Lógica de mensajes
+- `chat.gateway.test.ts` - Socket.io handlers
+- `rooms.repository.test.ts` - Queries Drizzle
+- `rooms.service.test.ts` - Lógica de salas
+- `users.service.test.ts` - Lógica de usuarios
+
+**Coverage**: 92% statements, 75% branches, 92% functions, 95% lines
+
+## Arquitectura
+
+```
+Gateway (chat.gateway.ts)
+    ↓ Valida con Zod schemas
+Service (*.service.ts)
+    ↓ Lógica de negocio
+Repository (rooms.repository.ts)
+    ↓ Drizzle queries
+SQLite (better-sqlite3)
+```
+
+## Features
+
+- Rate limiting: mensajes (2s), typing (1s)
+- Bans temporales (10 min)
+- Validación estricta de todos los eventos
+- Códigos de sala únicos (6 chars alfanuméricos)
+- Alias únicos por sala
+- Max 1000 caracteres por mensaje
+
+## Documentación
+
+Ver instrucciones de arquitectura en `.github/instructions/nodejs-architecture.instructions.md` del proyecto principal.
 npm start
 ```
 

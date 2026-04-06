@@ -1,213 +1,149 @@
-import Database from 'better-sqlite3';
 import type { Room, RoomUser } from './rooms.types.js';
+import {
+  insertRoom,
+  deleteRoomRow,
+  findRoomRowById,
+  findRoomRowByCode,
+  listRoomRowsByOwner,
+  codeExistsInDb,
+  findRoomByNameAndOwner,
+  _truncateRooms,
+} from './rooms.repository.js';
 
-/** SQLite database instance — initialized via initDb(). */
-let db: InstanceType<typeof Database> | null = null;
-
-/** Runtime state — users, aliases, bans. Lost on restart (intentional). */
+/** Estado en memoria — usuarios, aliases, bans. Se pierde al reiniciar. */
 const rooms = new Map<string, Room>();
 
-interface RoomRow {
-  id: string;
-  name: string;
-  code: string;
-  ownerAlias: string;
-}
-
-/**
- * Initializes the SQLite database and creates the rooms table if it does not exist.
- * Call this once at server startup. Accepts ':memory:' for in-memory (tests).
- *
- * @param path - File path or ':memory:' for an in-memory database.
- */
-export function initDb(path: string = './rooms.db'): void {
-  db = new Database(path);
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS rooms (
-      id        TEXT PRIMARY KEY,
-      name      TEXT NOT NULL,
-      code      TEXT UNIQUE NOT NULL,
-      ownerAlias TEXT NOT NULL
-    )
-  `);
-}
-
-function getDb(): InstanceType<typeof Database> {
-  if (!db) throw new Error('Database not initialized. Call initDb() first.');
-  return db;
-}
-
-/** @internal Only for tests — clears both the runtime Map and the SQLite table. */
+/** Solo para tests — limpia el Map en memoria y la tabla SQLite. */
 export function _resetRooms(): void {
   rooms.clear();
-  if (db) {
-    db.exec('DELETE FROM rooms');
-  }
+  _truncateRooms();
+}
+
+/** Hidrata un row de SQLite a un Room con estado runtime vacío. */
+function hydrateRoom(row: { id: string; name: string; code: string; ownerAlias: string }): Room {
+  return {
+    id: row.id,
+    name: row.name,
+    code: row.code,
+    ownerAlias: row.ownerAlias,
+    users: new Map(),
+    aliases: new Set(),
+    bans: new Map(),
+  };
 }
 
 /**
- * Returns the room with the given ID, creating it in-memory only if it does not exist.
- * Used for legacy "lobby"-style rooms that are not persisted to SQLite.
+ * Devuelve la sala con el ID dado, creándola solo en memoria si no existe.
+ * Se usa para salas "lobby" legacy que no se persisten.
  */
 export function getRoom(roomId: string): Room {
   if (!rooms.has(roomId)) {
-    rooms.set(roomId, {
-      id: roomId,
-      name: roomId,
-      code: '',
-      ownerAlias: 'system',
-      users: new Map(),
-      aliases: new Set(),
-      bans: new Map(),
-    });
+    rooms.set(roomId, hydrateRoom({ id: roomId, name: roomId, code: '', ownerAlias: 'system' }));
   }
   return rooms.get(roomId)!;
 }
 
 /**
- * Generates a unique 6-character alphanumeric code, checking both the runtime Map
- * and the SQLite database to ensure uniqueness across server restarts.
+ * Genera un código alfanumérico único de 6 caracteres,
+ * verificando tanto el Map runtime como SQLite.
  */
 function generateUniqueCode(): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  const db = getDb();
-  const stmt = db.prepare('SELECT id FROM rooms WHERE code = ?');
   let code: string;
   do {
     code = Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
-  } while (stmt.get(code) !== undefined);
+  } while (codeExistsInDb(code));
   return code;
 }
 
 /**
- * Creates a new room, persisting its metadata to SQLite and adding runtime state to the Map.
+ * Crea una sala nueva, la persiste en SQLite y la agrega al estado runtime.
  *
- * @param name       - Room name.
- * @param ownerAlias - Alias of the user creating the room.
- * @returns The newly created {@link Room}.
+ * @param name       - Nombre de la sala.
+ * @param ownerAlias - Alias del creador.
+ * @throws {Error} Si el usuario ya tiene una sala con ese nombre.
  */
 export function createRoom(name: string, ownerAlias: string): Room {
+  // Validar que el usuario no tenga ya una sala con ese nombre
+  const existingRoom = findRoomByNameAndOwner(name, ownerAlias);
+  if (existingRoom) {
+    throw new Error(`Ya tienes una sala activa con el nombre "${name}"`);
+  }
+
   const id = `room-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const code = generateUniqueCode();
-  getDb().prepare('INSERT INTO rooms (id, name, code, ownerAlias) VALUES (?, ?, ?, ?)').run(id, name, code, ownerAlias);
-  const room: Room = {
-    id,
-    name,
-    code,
-    ownerAlias,
-    users: new Map(),
-    aliases: new Set(),
-    bans: new Map(),
-  };
+
+  insertRoom({ id, name, code, ownerAlias });
+
+  const room = hydrateRoom({ id, name, code, ownerAlias });
   rooms.set(id, room);
   return room;
 }
 
 /**
- * Deletes a room from both the runtime Map and SQLite.
+ * Elimina una sala del Map runtime y de SQLite.
  *
- * @param roomId - ID of the room to delete.
- * @returns The deleted {@link Room}, or `undefined` if it was not found.
+ * @returns La sala eliminada, o `undefined` si no existía.
  */
 export function deleteRoom(roomId: string): Room | undefined {
   const room = rooms.get(roomId);
   rooms.delete(roomId);
-  getDb().prepare('DELETE FROM rooms WHERE id = ?').run(roomId);
+  deleteRoomRow(roomId);
   return room;
 }
 
 /**
- * Finds a room by its 6-character code.
- * Checks the runtime Map first; if not found, hydrates from SQLite (lazy load).
- *
- * @param code - 6-character alphanumeric room code.
- * @returns The {@link Room} or `undefined` if not found.
+ * Busca una sala por su código de 6 caracteres.
+ * Primero busca en memoria; si no la encuentra, hidrata desde SQLite.
  */
 export function findRoomByCode(code: string): Room | undefined {
   for (const room of rooms.values()) {
     if (room.code === code) return room;
   }
-  const row = getDb().prepare('SELECT id, name, code, ownerAlias FROM rooms WHERE code = ?').get(code) as RoomRow | undefined;
+
+  const row = findRoomRowByCode(code);
   if (!row) return undefined;
-  const room: Room = {
-    id: row.id,
-    name: row.name,
-    code: row.code,
-    ownerAlias: row.ownerAlias,
-    users: new Map(),
-    aliases: new Set(),
-    bans: new Map(),
-  };
+
+  const room = hydrateRoom(row);
   rooms.set(row.id, room);
   return room;
 }
 
 /**
- * Returns all rooms owned by the given alias, merging SQLite metadata with runtime state.
- * After a server restart, returned rooms have empty runtime state (users/aliases/bans).
- *
- * @param ownerAlias - The alias to look up.
- * @returns Array of {@link Room} owned by the given alias.
+ * Devuelve todas las salas de un owner, mezclando estado runtime con SQLite.
+ * Tras un reinicio, las salas devueltas tienen estado runtime vacío.
  */
 export function listRoomsByOwner(ownerAlias: string): Room[] {
-  const rows = getDb().prepare('SELECT id, name, code, ownerAlias FROM rooms WHERE ownerAlias = ?').all(ownerAlias) as RoomRow[];
+  const rows = listRoomRowsByOwner(ownerAlias);
   return rows.map((row) => {
     const runtime = rooms.get(row.id);
     if (runtime) return runtime;
-    return {
-      id: row.id,
-      name: row.name,
-      code: row.code,
-      ownerAlias: row.ownerAlias,
-      users: new Map(),
-      aliases: new Set(),
-      bans: new Map(),
-    };
+    return hydrateRoom(row);
   });
 }
 
 /**
- * Finds a room by ID without creating it.
- * Checks the runtime Map first; if not found, hydrates from SQLite.
- *
- * @param roomId - Room ID.
- * @returns The {@link Room} or `undefined` if not found.
+ * Busca una sala por ID sin crearla.
+ * Primero busca en memoria; si no la encuentra, hidrata desde SQLite.
  */
 export function findRoom(roomId: string): Room | undefined {
   const room = rooms.get(roomId);
   if (room) return room;
-  const row = db?.prepare('SELECT id, name, code, ownerAlias FROM rooms WHERE id = ?').get(roomId) as RoomRow | undefined;
+
+  const row = findRoomRowById(roomId);
   if (!row) return undefined;
-  const hydrated: Room = {
-    id: row.id,
-    name: row.name,
-    code: row.code,
-    ownerAlias: row.ownerAlias,
-    users: new Map(),
-    aliases: new Set(),
-    bans: new Map(),
-  };
+
+  const hydrated = hydrateRoom(row);
   rooms.set(row.id, hydrated);
   return hydrated;
 }
 
-/**
- * Returns the list of aliases of all users currently in the room.
- *
- * @param room - The room to query.
- * @returns Array of alias strings.
- */
+/** Devuelve la lista de aliases de los usuarios actualmente en la sala. */
 export function getRoomUserAliases(room: Room): string[] {
   return Array.from(room.users.values()).map((u) => u.alias);
 }
 
-/**
- * Finds a user in a room by their display alias.
- *
- * @param room  - Room to search.
- * @param alias - Alias to look for.
- * @returns Object with `socketId` and `user`, or `undefined` if not found.
- */
+/** Busca un usuario en una sala por su alias. */
 export function findUserByAlias(room: Room, alias: string): { socketId: string; user: RoomUser } | undefined {
   for (const [sid, u] of room.users.entries()) {
     if (u.alias === alias) return { socketId: sid, user: u };
@@ -215,14 +151,7 @@ export function findUserByAlias(room: Room, alias: string): { socketId: string; 
   return undefined;
 }
 
-/**
- * Adds a new user to a room and registers their alias.
- *
- * @param room     - Target room.
- * @param socketId - Socket.io connection ID of the joining user.
- * @param alias    - Chosen display name.
- * @returns The created {@link RoomUser} record.
- */
+/** Agrega un usuario a una sala y registra su alias. */
 export function addUserToRoom(room: Room, socketId: string, alias: string): RoomUser {
   const user: RoomUser = {
     socketId,
@@ -236,13 +165,7 @@ export function addUserToRoom(room: Room, socketId: string, alias: string): Room
   return user;
 }
 
-/**
- * Removes a user from a room by socket ID, freeing their alias.
- *
- * @param room     - Room the user belongs to.
- * @param socketId - Socket ID of the user to remove.
- * @returns The removed {@link RoomUser}, or `undefined` if not found.
- */
+/** Elimina un usuario de una sala por socket ID, liberando su alias. */
 export function removeUserFromRoom(room: Room, socketId: string): RoomUser | undefined {
   const user = room.users.get(socketId);
   if (user) {
@@ -252,25 +175,71 @@ export function removeUserFromRoom(room: Room, socketId: string): RoomUser | und
   return user;
 }
 
- * Devuelve la lista de aliases de todos los usuarios actualmente en la sala.
- *
- * @param room - La sala a consultar.
- * @returns Array de strings con los aliases.
+/**
+ * Obtiene todas las salas relevantes para un usuario:
+ * - Salas donde está actualmente conectado (socket.rooms)
+ * - Salas que ha creado (owner), aunque no esté conectado
+ * @param socketRooms - Set de room IDs del socket (socket.rooms)
+ * @param socketId - ID del socket para excluir
+ * @param ownerAlias - Alias del usuario para buscar salas creadas
+ * @returns Array de información de salas con flag isOwner e isActive
  */
-export function getRoomUserAliases(room: Room): string[] {
-  return Array.from(room.users.values()).map((u) => u.alias);
+export function getSocketRooms(
+  socketRooms: Set<string>, 
+  socketId: string, 
+  ownerAlias?: string
+): Array<{ id: string; name: string; code: string; userCount: number; isOwner: boolean; isActive: boolean }> {
+  const result = new Map<string, { id: string; name: string; code: string; userCount: number; isOwner: boolean; isActive: boolean }>();
+  
+  // 1. Agregar salas donde el socket está actualmente conectado
+  for (const roomId of socketRooms) {
+    if (roomId === socketId) continue; // Excluir el room personal del socket
+    
+    const room = findRoom(roomId);
+    if (room) {
+      result.set(roomId, {
+        id: room.id,
+        name: room.name,
+        code: room.code,
+        userCount: room.users.size,
+        isOwner: ownerAlias ? room.ownerAlias === ownerAlias : false,
+        isActive: true,
+      });
+    }
+  }
+  
+  // 2. Agregar salas que el usuario ha creado (aunque no esté conectado)
+  if (ownerAlias) {
+    const ownedRooms = listRoomsByOwner(ownerAlias);
+    for (const room of ownedRooms) {
+      if (!result.has(room.id)) {
+        // Solo agregar si no está ya en el resultado (no está activo en ella)
+        result.set(room.id, {
+          id: room.id,
+          name: room.name,
+          code: room.code,
+          userCount: room.users.size,
+          isOwner: true,
+          isActive: false,
+        });
+      }
+    }
+  }
+  
+  return Array.from(result.values());
 }
 
 /**
- * Busca un usuario en una sala por su alias de display.
- *
- * @param room  - Sala donde buscar.
- * @param alias - Alias a buscar.
- * @returns Objeto con `socketId` y `user`, o `undefined` si no se encontró.
+ * Verifica si una sala está vacía y la elimina si es necesario.
+ * @param roomId - ID de la sala a verificar
+ * @returns true si la sala fue eliminada, false si no
  */
-export function findUserByAlias(room: Room, alias: string): { socketId: string; user: RoomUser } | undefined {
-  for (const [sid, u] of room.users.entries()) {
-    if (u.alias === alias) return { socketId: sid, user: u };
+export function cleanupEmptyRoom(roomId: string): boolean {
+  const room = findRoom(roomId);
+  if (room && room.users.size === 0) {
+    deleteRoom(roomId);
+    return true;
   }
-  return undefined;
+  return false;
 }
+

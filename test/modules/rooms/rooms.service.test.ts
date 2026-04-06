@@ -10,8 +10,8 @@ import {
   deleteRoom,
   findRoomByCode,
   listRoomsByOwner,
-  initDb,
 } from '../../../src/modules/rooms/rooms.service';
+import { initDb } from '../../../src/modules/rooms/rooms.repository';
 
 beforeAll(() => initDb(':memory:'));
 beforeEach(() => _resetRooms());
@@ -115,6 +115,29 @@ describe('createRoom', () => {
   it('should return the created room when calling findRoom', () => {
     const room = createRoom('TestRoom', 'owner1');
     expect(findRoom(room.id)).toBe(room);
+  });
+
+  it('should throw error when creating room with duplicate name for same owner', () => {
+    createRoom('SameName', 'owner1');
+    expect(() => createRoom('SameName', 'owner1')).toThrow('Ya tienes una sala activa con el nombre "SameName"');
+  });
+
+  it('should allow different owners to create rooms with the same name', () => {
+    const room1 = createRoom('SharedName', 'owner1');
+    const room2 = createRoom('SharedName', 'owner2');
+    expect(room1.name).toBe('SharedName');
+    expect(room2.name).toBe('SharedName');
+    expect(room1.ownerAlias).toBe('owner1');
+    expect(room2.ownerAlias).toBe('owner2');
+    expect(room1.id).not.toBe(room2.id);
+  });
+
+  it('should allow creating room with same name after deleting the old one', () => {
+    const room1 = createRoom('RecycleName', 'owner1');
+    deleteRoom(room1.id);
+    const room2 = createRoom('RecycleName', 'owner1');
+    expect(room2.name).toBe('RecycleName');
+    expect(room2.ownerAlias).toBe('owner1');
   });
 });
 

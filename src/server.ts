@@ -4,7 +4,7 @@ import { createApp } from './app.js';
 import { socketConfig } from './config/socket.js';
 import { ENV } from './config/env.js';
 import { registerChatHandlers } from './modules/chat/chat.gateway.js';
-import { initDb } from './modules/rooms/rooms.service.js';
+import { initDb } from './modules/rooms/rooms.repository.js';
 import type {
   ServerToClientEvents,
   ClientToServerEvents,

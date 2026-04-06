@@ -1,5 +1,6 @@
 import { registerChatHandlers } from '../../../src/modules/chat/chat.gateway';
 import { _resetRooms, getRoom, addUserToRoom } from '../../../src/modules/rooms/rooms.service';
+import { initDb } from '../../../src/modules/rooms/rooms.repository';
 
 // ---- Socket / IO mocks ----
 function makeMockSocket(id = 'sock1') {
@@ -8,6 +9,7 @@ function makeMockSocket(id = 'sock1') {
   return {
     id,
     rooms,
+    data: {} as Record<string, unknown>,
     on: jest.fn((event: string, handler: Function) => { handlers.set(event, handler); }),
     join: jest.fn((room: string) => rooms.add(room)),
     leave: jest.fn((room: string) => rooms.delete(room)),
@@ -36,6 +38,7 @@ function makeMockIO() {
   return io;
 }
 
+beforeAll(() => initDb(':memory:'));
 beforeEach(() => _resetRooms());
 
 describe('registerChatHandlers', () => {
@@ -236,7 +239,7 @@ describe('registerChatHandlers', () => {
   });
 
   describe('create_room', () => {
-    it('should create room, join socket, register creator and ack with roomId and roomCode', () => {
+    it('should create room and ack with roomId and roomCode', () => {
       const io = makeMockIO();
       const socket = makeMockSocket();
       registerChatHandlers(io);
@@ -245,7 +248,6 @@ describe('registerChatHandlers', () => {
       const ack = jest.fn();
       socket._trigger('create_room', { name: 'MyRoom', alias: 'Alice' }, ack);
       expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: true, roomId: expect.any(String), roomCode: expect.any(String) }));
-      expect(socket.join).toHaveBeenCalledWith(expect.any(String));
     });
 
     it('should ack error 4200 on invalid payload (missing alias)', () => {
@@ -259,7 +261,7 @@ describe('registerChatHandlers', () => {
       expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: false, code: 4200 }));
     });
 
-    it('should register creator in room.users so list_my_rooms returns userCount > 0', () => {
+    it('should create room but not join user until explicit join_room', () => {
       const io = makeMockIO();
       const socket = makeMockSocket();
       registerChatHandlers(io);
@@ -269,11 +271,14 @@ describe('registerChatHandlers', () => {
       socket._trigger('create_room', { name: 'MyRoom', alias: 'Alice' }, createAck);
       const roomId = createAck.mock.calls[0][0].roomId as string;
 
+      // Verificar que la sala existe pero está vacía
       const listAck = jest.fn();
-      socket._trigger('list_my_rooms', listAck);
-      const rooms = listAck.mock.calls[0][0].rooms as Array<{ userCount: number }>;
+      socket._trigger('list_my_rooms', { alias: 'Alice' }, listAck);
+      const rooms = listAck.mock.calls[0][0].rooms as Array<{ userCount: number; isOwner: boolean; isActive: boolean }>;
       const createdRoom = rooms.find((r: any) => r.id === roomId);
-      expect(createdRoom?.userCount).toBe(1);
+      expect(createdRoom?.userCount).toBe(0);
+      expect(createdRoom?.isOwner).toBe(true);
+      expect(createdRoom?.isActive).toBe(false);
     });
   });
 
@@ -315,8 +320,13 @@ describe('registerChatHandlers', () => {
 
       const createAck = jest.fn();
       socket._trigger('create_room', { name: 'TestRoom', alias: 'Alice' }, createAck);
+      const roomId = createAck.mock.calls[0][0].roomId as string;
       const roomCode = createAck.mock.calls[0][0].roomCode as string;
 
+      // First join explicitly
+      socket._trigger('join_room', { room: roomId, alias: 'Alice' }, jest.fn());
+
+      // Try to join again via code
       const joinAck = jest.fn();
       socket._trigger('join_room_by_code', { code: roomCode, alias: 'Alice' }, joinAck);
       expect(joinAck).toHaveBeenCalledWith(expect.objectContaining({ ok: false, code: 4202 }));
@@ -337,7 +347,7 @@ describe('registerChatHandlers', () => {
       const roomId = createAck.mock.calls[0][0].roomId as string;
 
       const ack = jest.fn();
-      socket._trigger('delete_room', { roomId }, ack);
+      socket._trigger('delete_room', { roomId, alias: 'Alice' }, ack);
       expect(ack).toHaveBeenCalledWith({ ok: true });
       expect(broadcastEmit).toHaveBeenCalledWith('room_deleted', expect.objectContaining({ roomId }));
     });
@@ -355,7 +365,7 @@ describe('registerChatHandlers', () => {
       const roomId = createAck.mock.calls[0][0].roomId as string;
 
       const ack = jest.fn();
-      other._trigger('delete_room', { roomId }, ack);
+      other._trigger('delete_room', { roomId, alias: 'Bob' }, ack);
       expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: false, code: 4401 }));
     });
 
@@ -366,56 +376,88 @@ describe('registerChatHandlers', () => {
       io._connect(socket);
 
       const ack = jest.fn();
-      socket._trigger('delete_room', { roomId: 'ghost-room' }, ack);
+      socket._trigger('delete_room', { roomId: 'ghost-room', alias: 'Alice' }, ack);
       expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: false, code: 4401 }));
     });
   });
 
   describe('list_my_rooms', () => {
-    it('should return rooms owned by the current socket', () => {
+    it('should return rooms the socket has joined with correct flags', () => {
       const io = makeMockIO();
       const socket = makeMockSocket();
       registerChatHandlers(io);
       io._connect(socket);
 
-      socket._trigger('create_room', { name: 'Room1', alias: 'Alice' }, jest.fn());
-      socket._trigger('create_room', { name: 'Room2', alias: 'Alice2' }, jest.fn());
+      // Crear salas
+      const createAck1 = jest.fn();
+      const createAck2 = jest.fn();
+      socket._trigger('create_room', { name: 'Room1', alias: 'Alice' }, createAck1);
+      socket._trigger('create_room', { name: 'Room2', alias: 'Alice' }, createAck2);
+      
+      const room1Id = createAck1.mock.calls[0][0].roomId as string;
+      const room2Id = createAck2.mock.calls[0][0].roomId as string;
+      
+      // Unirse explícitamente a Room1
+      socket._trigger('join_room', { room: room1Id, alias: 'Alice' }, jest.fn());
 
       const ack = jest.fn();
-      socket._trigger('list_my_rooms', ack);
+      socket._trigger('list_my_rooms', { alias: 'Alice' }, ack);
+      const result = ack.mock.calls[0][0];
+      
+      // Room1: isOwner=true, isActive=true (está conectado)
+      const room1 = result.rooms.find((r: any) => r.name === 'Room1');
+      expect(room1?.isOwner).toBe(true);
+      expect(room1?.isActive).toBe(true);
+      
+      // Room2: isOwner=true, isActive=false (no está conectado)
+      const room2 = result.rooms.find((r: any) => r.name === 'Room2');
+      expect(room2?.isOwner).toBe(true);
+      expect(room2?.isActive).toBe(false);
+    });
+
+    it('should return empty rooms array when socket has not joined any rooms', () => {
+      const io = makeMockIO();
+      const socket = makeMockSocket();
+      registerChatHandlers(io);
+      io._connect(socket);
+
+      const ack = jest.fn();
+      socket._trigger('list_my_rooms', { alias: 'Alice' }, ack);
+      expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: true, rooms: [] }));
+    });
+
+    it('should include owned rooms even if not active in them', () => {
+      const io = makeMockIO();
+      const alice = makeMockSocket('alice');
+      const bob = makeMockSocket('bob');
+      registerChatHandlers(io);
+      io._connect(alice);
+      io._connect(bob);
+
+      // Alice crea sala y se une
+      const createAck = jest.fn();
+      alice._trigger('create_room', { name: 'MyRoom', alias: 'Alice' }, createAck);
+      const roomId = createAck.mock.calls[0][0].roomId as string;
+      const roomCode = createAck.mock.calls[0][0].roomCode as string;
+      
+      alice._trigger('join_room', { room: roomId, alias: 'Alice' }, jest.fn());
+      
+      // Bob se une
+      const joinAck = jest.fn();
+      bob._trigger('join_room_by_code', { code: roomCode, alias: 'Bob' }, joinAck);
+      
+      // Alice sale (pero Bob sigue, entonces la sala no se elimina)
+      alice._trigger('leave_room', { room: roomId });
+
+      // Alice pide su lista de salas
+      const ack = jest.fn();
+      alice._trigger('list_my_rooms', { alias: 'Alice' }, ack);
       expect(ack).toHaveBeenCalledWith(expect.objectContaining({
         ok: true,
         rooms: expect.arrayContaining([
-          expect.objectContaining({ name: 'Room1' }),
-          expect.objectContaining({ name: 'Room2' }),
+          expect.objectContaining({ name: 'MyRoom', isOwner: true, isActive: false }),
         ]),
       }));
-    });
-
-    it('should return empty rooms array when socket owns no rooms', () => {
-      const io = makeMockIO();
-      const socket = makeMockSocket();
-      registerChatHandlers(io);
-      io._connect(socket);
-
-      const ack = jest.fn();
-      socket._trigger('list_my_rooms', ack);
-      expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: true, rooms: [] }));
-    });
-
-    it('should not include rooms owned by other sockets', () => {
-      const io = makeMockIO();
-      const socket1 = makeMockSocket('s1');
-      const socket2 = makeMockSocket('s2');
-      registerChatHandlers(io);
-      io._connect(socket1);
-      io._connect(socket2);
-
-      socket1._trigger('create_room', { name: 'S1Room', alias: 'Alice' }, jest.fn());
-
-      const ack = jest.fn();
-      socket2._trigger('list_my_rooms', ack);
-      expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: true, rooms: [] }));
     });
   });
 });

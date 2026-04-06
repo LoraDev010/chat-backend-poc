@@ -1,6 +1,8 @@
 import { joinRoom, leaveRoom, kickUser } from '../../../src/modules/users/users.service';
 import { getRoom, _resetRooms, addUserToRoom } from '../../../src/modules/rooms/rooms.service';
+import { initDb } from '../../../src/modules/rooms/rooms.repository';
 
+beforeAll(() => initDb(':memory:'));
 beforeEach(() => _resetRooms());
 
 describe('joinRoom', () => {

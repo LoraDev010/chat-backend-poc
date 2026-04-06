@@ -5,7 +5,7 @@ import type {
   InterServerEvents,
   SocketData,
 } from '../../shared/types/socket.types.js';
-import { findRoom, removeUserFromRoom, createRoom, deleteRoom, findRoomByCode, listRoomsByOwner, addUserToRoom } from '../rooms/rooms.service.js';
+import { findRoom, removeUserFromRoom, createRoom, deleteRoom, findRoomByCode, listRoomsByOwner, addUserToRoom, getSocketRooms, cleanupEmptyRoom } from '../rooms/rooms.service.js';
 import * as usersService from '../users/users.service.js';
 import * as chatService from './chat.service.js';
 import { joinRoomSchema, kickUserSchema } from '../users/users.schemas.js';
@@ -58,6 +58,9 @@ export function registerChatHandlers(io: TypedIO): void {
       if (alias) {
         socket.leave(room);
         io.to(room).emit('user_left', { alias, id: socket.id });
+        
+        // Auto-limpieza: eliminar sala si queda vacía
+        cleanupEmptyRoom(room);
       }
     });
 
@@ -118,10 +121,18 @@ export function registerChatHandlers(io: TypedIO): void {
       // Persist alias on this socket for stable ownership lookups
       socket.data.alias = alias;
 
-      const room = createRoom(name, alias);
-      socket.join(room.id);
-      addUserToRoom(room, socket.id, alias);
-      ack?.({ ok: true, roomId: room.id, roomCode: room.code });
+      try {
+        const room = createRoom(name, alias);
+        // NO agregamos al usuario aquí - lo hará cuando entre al chat con join_room
+        ack?.({ ok: true, roomId: room.id, roomCode: room.code, roomName: room.name });
+      } catch (error) {
+        // Error de nombre duplicado
+        if (error instanceof Error && error.message.includes('Ya tienes una sala activa')) {
+          return ack?.({ ok: false, code: 4204, message: error.message });
+        }
+        // Error inesperado
+        return ack?.({ ok: false, code: 5000, message: 'internal_server_error' });
+      }
     });
 
     socket.on('join_room_by_code', (payload, ack) => {
@@ -155,15 +166,14 @@ export function registerChatHandlers(io: TypedIO): void {
       if (!parsed.success) {
         return ack?.({ ok: false, code: 4400, message: 'invalid input' });
       }
-      const { roomId } = parsed.data;
+      const { roomId, alias } = parsed.data;
       const room = findRoom(roomId);
       if (!room) {
         return ack?.({ ok: false, code: 4401, message: 'room_not_found' });
       }
 
-      // Use socket.data.alias (set during create/join) or fallback to payload alias
-      const ownerAlias = socket.data.alias ?? (payload as Record<string, string>).alias;
-      if (room.ownerAlias !== ownerAlias) {
+      // Verificar que el alias del usuario coincida con el owner de la sala
+      if (room.ownerAlias !== alias) {
         return ack?.({ ok: false, code: 4401, message: 'not_owner' });
       }
 
@@ -176,14 +186,10 @@ export function registerChatHandlers(io: TypedIO): void {
     });
 
     socket.on('list_my_rooms', (data, ack) => {
+      // Obtener alias del socket.data o del payload
       const alias = socket.data.alias ?? data?.alias;
-      if (!alias) return ack?.({ ok: true, rooms: [] });
-      const myRooms = listRoomsByOwner(alias).map((r) => ({
-        id: r.id,
-        name: r.name,
-        code: r.code,
-        userCount: r.users.size,
-      }));
+      // Devolver salas donde está activo + salas que ha creado
+      const myRooms = getSocketRooms(socket.rooms, socket.id, alias);
       ack?.({ ok: true, rooms: myRooms });
     });
 
@@ -195,6 +201,9 @@ export function registerChatHandlers(io: TypedIO): void {
         const user = removeUserFromRoom(r, socket.id);
         if (user) {
           io.to(room).emit('user_left', { alias: user.alias, id: socket.id });
+          
+          // Auto-limpieza: eliminar sala si queda vacía
+          cleanupEmptyRoom(room);
         }
       }
     });
